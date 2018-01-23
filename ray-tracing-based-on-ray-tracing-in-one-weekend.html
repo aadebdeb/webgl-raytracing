@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <title>WebGL GLSL Template</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+  <script src="glsl.js"></script>
+  <script>
+
+    function addColorToGui(gui, props, name, func, scope) {
+      const controller = gui.addColor(props, name);
+      controller.onChange(func.bind(scope));
+    }
+
+    function addToGui(gui, props, name, func, scope, min, max, step) {
+      const controller = gui.add(props, name, min, max, step);
+      controller.onChange(func.bind(scope));
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+
+      const glsl = new GLSL({
+        canvasId: 'canvas',
+        fragmentShaderSource: `
+precision mediump float;
+
+uniform float uTime;
+uniform vec2 uResolution;
+uniform vec2 uMouse;
+uniform bool uMousePressed;
+
+uniform float uCameraPosition;
+uniform float uCameraHeight;
+uniform float uFieldOfView;
+uniform float uFocus;
+uniform float uAperture;
+uniform vec3 uGroundColor1;
+uniform vec3 uGroundColor2;
+uniform vec3 uSkyTopColor;
+uniform vec3 uSkyBottomColor;
+uniform vec3 uLambertianColor;
+uniform vec3 uMetalColor;
+uniform float uFuzziness;
+uniform float uIndexOfRefraction;
+uniform int uSamples;
+
+#define PI 3.14159265359
+#define TWO_PI 6.28318530718
+
+struct HitInfo {
+  vec3 pos;
+  vec3 normal;
+  int reflectType;
+};
+
+float random(float x) {
+  return fract(sin(x) * 4245.324);
+}
+
+float random(vec2 x) {
+  return fract(sin(dot(x, vec2(12.9898, 78.233))) * 43758.5453123);
+}
+
+vec2 random2(vec2 x) {
+  return fract(sin(vec2(dot(x, vec2(12.9898, 78.233)), dot(x, vec2(19.392, 59.434)))) * 43758.5453123);
+}
+
+float randseed = 0.423;
+
+float random() {
+  randseed += 0.01;
+  return random(randseed);
+}
+
+vec3 random_in_unit_sphere() {
+  vec3 v;
+  for (int i = 0; i <  100; i++) {
+    randseed += 0.01;
+    float rx = random(randseed);
+    randseed += 0.01;
+    float ry = random(randseed);
+    randseed += 0.01;
+    float rz = random(randseed);
+    v = vec3(rx, ry, rz) * 2.0 - 1.0;
+    if (length(v) <= 1.0) break;
+  }
+  return v;
+}
+
+vec2 random_on_unit_disk() {
+  vec2 v;
+  for (int i = 0; i < 100; i++) {
+    randseed += 0.01;
+    float rx = random(randseed);
+    randseed += 0.01;
+    float ry = random(randseed);
+    v = vec2(rx, ry) * 2.0 - 1.0;
+    if (length(v) <= 1.0) break;
+  }
+  return v;
+}
+
+mat3 camera(in vec3 pos, in vec3 tar, in vec3 up) {
+  vec3 cz = normalize(tar - pos);
+  vec3 cx = cross(cz, normalize(up));
+  vec3 cy = cross(cx, cz);
+  return mat3(cx, cy, cz);
+}
+
+vec3 backgroundColor(in vec3 dir) {
+  return mix(uSkyBottomColor, uSkyTopColor, dir.y * 0.5 + 0.5);
+}
+
+bool plane(in vec3 pos, in vec3 dir, in float y,
+  in int reflectType, in float tmin, inout float tmax, inout HitInfo info) {
+  if (dir.y == 0.0) return false;
+  float tt = (y - pos.y) / dir.y;
+  if (tt > tmin && tt < tmax) {
+    info.pos = pos + tt * dir;
+    info.normal = vec3(0.0, 1.0, 0.0);
+    info.reflectType = reflectType;
+    return true;
+  }
+  return false;
+}
+
+bool sphere(in vec3 pos, in vec3 dir, in vec3 center, in float radius,
+  in int reflectType, in float tmin, inout float tmax, inout HitInfo info) {
+  vec3 oc = pos - center;
+  float a = dot(dir, dir);
+  float b = dot(oc, dir);
+  float c = dot(oc, oc) - radius * radius;
+  float dis = b * b - a * c;
+
+  if (dis < 0.0) return false;
+
+  float tt = (-b - sqrt(dis)) / a;
+  if (tt > tmin && tt < tmax) {
+    tmax = tt;
+    info.pos = pos + tt * dir;
+    info.normal = normalize(info.pos - center);
+    info.reflectType = reflectType;
+    return true;
+  }
+  tt = (-b + sqrt(dis)) / a;
+  if (tt > tmin && tt < tmax) {
+    tmax = tt;
+    info.pos = pos + tt * dir;
+    info.normal = normalize(info.pos - center);
+    info.reflectType = reflectType;
+    return true;
+  }
+
+  return false;
+}
+
+const float POS_RADIUS = 3.0;
+const vec3 SPHERE_POS1 = vec3(POS_RADIUS * cos(0.0), 0.0, POS_RADIUS * sin(0.0));
+const vec3 SPHERE_POS2 = vec3(POS_RADIUS * cos(TWO_PI / 3.0), 0.0, POS_RADIUS * sin(TWO_PI / 3.0));
+const vec3 SPHERE_POS3 = vec3(POS_RADIUS * cos(TWO_PI / 3.0 * 2.0), 0.0, POS_RADIUS * sin(TWO_PI / 3.0 * 2.0));
+const float SPHERE_RADIUS = 2.0;
+
+bool intersect(in vec3 pos, in vec3 dir, inout HitInfo info) {
+  float tmin = 0.00001;
+  float tmax = 10000.0;
+  bool hit = false;
+  hit = sphere(pos, dir, SPHERE_POS1, SPHERE_RADIUS, 1, tmin, tmax, info) || hit;
+  hit = sphere(pos, dir, SPHERE_POS2, SPHERE_RADIUS, 2, tmin, tmax, info) || hit;
+  hit = sphere(pos, dir, SPHERE_POS3, SPHERE_RADIUS, 3, tmin, tmax, info) || hit;
+  hit = plane(pos, dir, -SPHERE_RADIUS, 0, tmin, tmax, info) || hit;
+  return hit;
+}
+
+float schlick(float cosine, float ref) {
+  float r0 = (1.0 - ref) / (1.0 + ref);
+  r0 = r0 * r0;
+  return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
+}
+
+vec3 checker(vec2 p) {
+  return sin(p.x * 5.0) * sin(p.y * 5.0) > 0.0 ? uGroundColor1 : uGroundColor2;
+}
+
+vec3 trace(in vec3 pos, in vec3 dir) {
+  HitInfo info;
+  vec3 c = vec3(1.0);
+  for (int i = 0; i < 10; i++) {
+    if (intersect(pos, dir, info)) {
+      pos = info.pos;
+      if (info.reflectType == 0) { // ground
+        c *= checker(pos.xz);
+        dir = info.normal + random_in_unit_sphere();
+      } else if (info.reflectType == 1) { // lambertian
+        c *= uLambertianColor;
+        dir = info.normal + random_in_unit_sphere();
+      } else if (info.reflectType == 2) { // specular
+        c *= uMetalColor;
+        dir = normalize(reflect(dir, info.normal) + uFuzziness * random_in_unit_sphere());
+        if (dot(info.normal, dir) < 0.0) break;
+      } else if (info.reflectType == 3) { // dielectric
+        vec3 n;
+        float eta, cosine;
+        if (dot(dir, info.normal) < 0.0) {
+          n = info.normal;
+          eta = 1.0 / uIndexOfRefraction;
+          cosine = -dot(dir, info.normal) / length(dir);
+        } else {
+          n = -info.normal;
+          eta = uIndexOfRefraction;
+          cosine = uIndexOfRefraction * dot(dir, info.normal) / length(dir);
+        }
+        vec3 r = refract(normalize(dir), n, eta);
+        dir = r == vec3(0.0) || random() < schlick(cosine, uIndexOfRefraction) ? reflect(dir, n) : r;
+      }
+    } else {
+      c *= backgroundColor(dir);
+      break;
+    }
+  }
+  return c;
+}
+
+void ray(in mat3 cam, in vec3 origin, in vec2 uv, in float vfov, in float aspect, inout vec3 rpos, inout vec3 rdir) {
+  float theta = vfov * PI / 180.0;
+  float h = tan(theta / 2.0);
+  float w = h * aspect;
+  vec3 offset = cam * vec3(random_on_unit_disk(), 0.0) * uAperture;
+  rpos = origin + offset;
+  rdir = normalize(origin + cam * uFocus * vec3(w * uv.x, h * uv.y, 1.0) - rpos);
+}
+
+void main() {
+    vec2 m = uMouse / uResolution.y;
+
+    randseed = random(gl_FragCoord.xy * 0.01);
+
+    float camAngle = uCameraPosition * PI / 180.0;
+    vec3 pos = vec3(10.0 * cos(camAngle), uCameraHeight, 10.0 * sin(camAngle));
+    vec3 tar = vec3(0.0, 0.0, 0.0);
+    mat3 cam = camera(pos, tar, vec3(0.0, 1.0, 0.0));
+
+    vec3 c = vec3(0.0);
+
+    for (int i = 1; i <= 100; i++) {
+      vec2 pixel = gl_FragCoord.xy + random(gl_FragCoord.xy + float(i) * vec2(0.01));
+      vec2 st = (2.0 * pixel - uResolution.xy) / uResolution.xy;
+      vec3 rpos, rdir;
+      ray(cam, pos, st, uFieldOfView, uResolution.x / uResolution.y, rpos, rdir);
+      c += trace(rpos, rdir);
+      if (uSamples == i) break;
+    }
+    c /= float(uSamples < 100 ? uSamples : 100);
+
+    c = pow(c, vec3(1.0 / 2.2));
+
+    gl_FragColor = vec4(c, 1.0);
+}
+        `,
+      });
+
+      const props = {
+        cameraPosition: 0.0,
+        cameraHeight: 4.0,
+        fieldOfView: 90.0,
+        focus: 10.0,
+        aperture: 0.0,
+        groundColor1: [0, 0, 0],
+        groundColor2: [255, 255, 255],
+        skyTopColor: [128, 128, 255],
+        skyBottomColor: [255, 255, 255],
+        lambertianColor: [220, 100, 100],
+        metalColor: [255, 255, 255],
+        fuzziness: 0.0,
+        indexOfRefraction: 1.5,
+        samples: 20,
+        animation: true,
+      }
+
+      const gui = new dat.GUI();
+      const guiCamera = gui.addFolder('Camera');
+      addToGui(guiCamera, props, 'cameraPosition', function(v) {
+        glsl.setUniform('uCameraPosition', '1f', v);
+      }, this, -360, 360);
+      addToGui(guiCamera, props, 'cameraHeight', function(v) {
+        glsl.setUniform('uCameraHeight', '1f', v);
+      }, this, 0.0, 10.0);
+      addToGui(guiCamera, props, 'fieldOfView', function(v) {
+        glsl.setUniform('uFieldOfView', '1f', v);
+      }, this, 0, 180);
+      addToGui(guiCamera, props, 'focus', function(v) {
+        glsl.setUniform('uFocus', '1f', v);
+      }, this, 5, 25);
+      addToGui(guiCamera, props, 'aperture', function(v) {
+        glsl.setUniform('uAperture', '1f', v);
+      }, this, 0.0, 1.0);
+      const guiGround = gui.addFolder('Ground');
+      addColorToGui(guiGround, props, 'groundColor1', function(v) {
+        glsl.setUniform('uGroundColor1', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      addColorToGui(guiGround, props, 'groundColor2', function(v) {
+        glsl.setUniform('uGroundColor2', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      const guiSky = gui.addFolder('Sky');
+      addColorToGui(guiSky, props, 'skyTopColor', function(v) {
+        glsl.setUniform('uSkyTopColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      addColorToGui(guiSky, props, 'skyBottomColor', function(v) {
+        glsl.setUniform('uSkyBottomColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      const guiLambertianSphere = gui.addFolder('Lambertian Sphere');
+      addColorToGui(guiLambertianSphere, props, 'lambertianColor', function(v) {
+        glsl.setUniform('uLambertianColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      const guiMetalSphere = gui.addFolder('Metal Sphere');
+      addColorToGui(guiMetalSphere, props, 'metalColor', function(v) {
+        glsl.setUniform('uMetalColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      }, this);
+      addToGui(guiMetalSphere, props, 'fuzziness', function(v) {
+        glsl.setUniform('uFuzziness', '1f', v);
+      }, this, 0.0, 1.0);
+      const guiDielectricSphere = gui.addFolder('Dielectric Sphere');
+      addToGui(guiDielectricSphere, props, 'indexOfRefraction', function(v) {
+        glsl.setUniform('uIndexOfRefraction', '1f', v);
+      }, this, 1.0, 3.0);
+      addToGui(gui, props, 'samples', function(v) {
+        glsl.setUniform('uSamples', '1i', v);
+      }, this, 1, 100);
+      var funcToStartOrStopAnimation = function(v) {
+        if (v && !glsl.isAnimating()) {
+          glsl.start();
+        } else if (!v && glsl.isAnimating()) {
+          glsl.stop();
+        }
+      };
+      addToGui(gui, props, 'animation', funcToStartOrStopAnimation, this);
+
+      glsl.setUniform('uCameraPosition', '1f', props.cameraPosition);
+      glsl.setUniform('uFieldOfView', '1f', props.fieldOfView);
+      glsl.setUniform('uCameraHeight', '1f', props.cameraHeight);
+      glsl.setUniform('uFocus', '1f', props.focus);
+      glsl.setUniform('uAperture', '1f', props.aperture);
+      glsl.setUniform('uGroundColor1', '3fv', [props.groundColor1[0] / 255.0, props.groundColor1[1] / 255.0, props.groundColor1[2] / 255.0]);
+      glsl.setUniform('uGroundColor2', '3fv', [props.groundColor2[0] / 255.0, props.groundColor2[1] / 255.0, props.groundColor2[2] / 255.0]);
+      glsl.setUniform('uSkyTopColor', '3fv', [props.skyTopColor[0] / 255.0, props.skyTopColor[1] / 255.0, props.skyTopColor[2] / 255.0]);
+      glsl.setUniform('uSkyBottomColor', '3fv', [props.skyBottomColor[0] / 255.0, props.skyBottomColor[1] / 255.0, props.skyBottomColor[2] / 255.0]);
+      glsl.setUniform('uLambertianColor', '3fv', [props.lambertianColor[0] / 255.0, props.lambertianColor[1] / 255.0, props.lambertianColor[2] / 255.0]);
+      glsl.setUniform('uMetalColor', '3fv', [props.metalColor[0] / 255.0, props.metalColor[1] / 255.0, props.metalColor[2] / 255.0]);
+      glsl.setUniform('uFuzziness', '1f', props.fuzziness);
+      glsl.setUniform('uIndexOfRefraction', '1f', props.indexOfRefraction);
+      glsl.setUniform('uSamples', '1i', props.samples);
+
+      glsl.start();
+    });
+  </script>
+</body>
+</html>
