@@ -71,6 +71,22 @@ void main() {
     return buffer;
   }
 
+  function createTexture(gl, source, callback, scope) {
+    const image = new Image();
+    image.onload = function() {
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      callback.call(scope, texture);
+    }
+    image.src = source;
+  }
+
   /**
    * sets an attribute
    * @param [WebGLRenderingContext] gl
@@ -131,6 +147,7 @@ void main() {
     });
 
     this.uniforms = {};
+    this.textures = {};
     this.animationId = null;
   };
 
@@ -190,6 +207,12 @@ void main() {
       const value = this.uniforms[name].value;
       this.gl['uniform' + type](this.gl.getUniformLocation(this.program, name), value);
     }, this);
+    Object.keys(this.textures).forEach(function(name) {
+      const texture = this.textures[name].texture;
+      const value = this.textures[name].value;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+        this.gl.uniform1i(this.gl.getUniformLocation(this.program, name), value);
+    }, this);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.gl.drawArrays(this.gl.TRIANGLE_STRIP, 0, 4);
     this.gl.flush();
@@ -203,6 +226,18 @@ void main() {
       type: type,
       value: value
     };
+  };
+
+  GLSL.prototype.setTexture = function(name, src) {
+    const value = Object.keys(this.textures).length;
+    this.gl.activeTexture(this.gl['TEXTURE' + value]);
+    this.textures[name] = {
+      texture: null,
+      value: value
+    }
+    createTexture(this.gl, src, function(texture) {
+      this.textures[name].texture = texture;
+    }, this);
   };
 
   return GLSL;
