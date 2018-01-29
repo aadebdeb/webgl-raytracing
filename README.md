@@ -10,4 +10,4 @@
 
 [https://aadebdeb.github.io/webgl-raytracing/cornel-box-by-path-tracing.html](https://aadebdeb.github.io/webgl-raytracing/cornel-box-by-path-tracing.html)
 
-![Image of Ray Tracing Based on "Ray Tracing in one weekend"](https://aadebdeb.github.io/webgl-raytracing/screenshots/cornel-box-by-path-tracing.png)
+![Image of Cornel Box by Path Tracing](https://aadebdeb.github.io/webgl-raytracing/screenshots/cornel-box-by-path-tracing.png)
