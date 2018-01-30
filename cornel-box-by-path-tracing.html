@@ -207,8 +207,8 @@ bool intersect(in Ray ray, in float tmin, in float tmax, inout HitInfo info) {
 
 mat3 orthonormal(in vec3 z) {
   vec3 w = normalize(z);
-  vec3 u = cross(w, abs(w.x) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0));
-  vec3 v = cross(u, w);
+  vec3 u = normalize(cross(w, abs(w.x) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+  vec3 v = normalize(cross(u, w));
   return mat3(u, v, w);
 }
 
@@ -302,8 +302,8 @@ vec3 trace(in Ray ray) {
 
 mat3 camera(in vec3 pos, in vec3 tar, in vec3 up) {
   vec3 cz = normalize(tar - pos);
-  vec3 cx = cross(cz, normalize(up));
-  vec3 cy = cross(cx, cz);
+  vec3 cx = normalize(cross(cz, normalize(up)));
+  vec3 cy = normalize(cross(cx, cz));
   return mat3(cx, cy, cz);
 }
 

@@ -110,8 +110,8 @@ vec2 random_on_unit_disk() {
 
 mat3 camera(in vec3 pos, in vec3 tar, in vec3 up) {
   vec3 cz = normalize(tar - pos);
-  vec3 cx = cross(cz, normalize(up));
-  vec3 cy = cross(cx, cz);
+  vec3 cx = normalize(cross(cz, normalize(up)));
+  vec3 cy = normalize(cross(cx, cz));
   return mat3(cx, cy, cz);
 }
 
