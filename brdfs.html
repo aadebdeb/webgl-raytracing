@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <title>BRDFs</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+  <script src="glsl.js"></script>
+  <script>
+
+    function addColorToGui(gui, props, name, func, scope) {
+      const controller = gui.addColor(props, name);
+      controller.onChange(func.bind(scope));
+    }
+
+    function addToGui(gui, props, name, func, scope, min, max, step) {
+      const controller = gui.add(props, name, min, max, step);
+      controller.onChange(func.bind(scope));
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+
+      const glsl = new GLSL({
+        canvasId: 'canvas',
+        fragmentShaderSource: `
+precision mediump float;
+
+uniform float uTime;
+uniform vec2 uResolution;
+uniform vec2 uMouse;
+uniform bool uMousePressed;
+
+#define PI 3.14159265359
+#define TWO_PI 6.28318530718
+#define INV_PI 0.31830988618
+#define POSITIVE_INF 1e10
+#define NEGATIVE_INF -1e10
+
+uniform sampler2D uRandomTexture;
+uniform float uCameraDistance;
+uniform float uCameraAngle;
+uniform float uCameraHeight;
+uniform vec3 uLightColor1;
+uniform float uLightIntensity1;
+uniform vec3 uLightColor2;
+uniform float uLightIntensity2;
+uniform vec3 uLightColor3;
+uniform float uLightIntensity3;
+uniform vec3 uSpecularReflectionAlbedo;
+uniform vec3 uSpecularTransmissionAlbedo;
+uniform float uSpecularTransmissionEta;
+uniform vec3 uLambertianReflectionAlbedo;
+uniform vec3 uOrenNayerReflectionAlbedo;
+uniform float uOrenNayerReflectionSigma;
+uniform vec3 uBeckmannMicrofacetAlbedo;
+uniform float uBeckmannMicrofacetReflectionAlphaX;
+uniform float uBeckmannMicrofacetReflectionAlphaY;
+uniform vec3 uGGXMicrofacetAlbedo;
+uniform float uGGXMicrofacetReflectionAlphaX;
+uniform float uGGXMicrofacetReflectionAlphaY;
+uniform vec3 uFresnelBlendReflectionDiffuse;
+uniform vec3 uFresnelBlendReflectionSpecular;
+uniform vec3 uFloorColor;
+uniform int uSamples;
+
+#define LAMBERTIAN_REFLECTION 1
+#define OREN_NAYAR_REFLECTION 2
+#define SPECULAR_REFLECTION 3
+#define SPECULAR_TRANSMISSION 4
+#define BECKMANN_MICROFACET_REFLECTION 5
+#define GGX_MICROFACET_REFLECTION 6
+#define FRESNEL_BLEND_REFLECTION 7
+
+struct SurfaceInfo {
+  int reflectType;
+  vec3 color;
+  vec3 anotherColor;
+  float param1;
+  float param2;
+};
+
+struct HitInfo {
+  vec3 pos;
+  vec3 normal;
+  SurfaceInfo surfaceInfo;
+};
+
+struct Ray {
+  vec3 origin;
+  vec3 dir;
+};
+
+vec3 at(in Ray ray, in float t) {
+  return ray.origin + t * ray.dir;
+}
+
+int randomindex;
+SurfaceInfo floorSurface,
+            lambertianReflectionSurface, orenNayerReflectionSurface,
+            specularReflectionSurface, specularTransmissionSurface,
+            beckmannMicrofacetReflectionSurface,
+            GGXMicrofacetReflectionSurface,
+            fresnelBlendReflectionSurface;
+vec3 lightDirection1, lightDirection2, lightDirection3;
+void initialize() {
+  randomindex = int(texture2D(uRandomTexture, gl_FragCoord.xy * 0.01).x * 256.0 * 256.0);
+
+  floorSurface.reflectType = LAMBERTIAN_REFLECTION;
+  floorSurface.color = uFloorColor;
+  lambertianReflectionSurface.reflectType = LAMBERTIAN_REFLECTION;
+  lambertianReflectionSurface.color = uLambertianReflectionAlbedo;
+  orenNayerReflectionSurface.reflectType = OREN_NAYAR_REFLECTION;
+  orenNayerReflectionSurface.color = uOrenNayerReflectionAlbedo;
+  orenNayerReflectionSurface.param1 = uOrenNayerReflectionSigma;
+  specularReflectionSurface.reflectType = SPECULAR_REFLECTION;
+  specularReflectionSurface.color = uSpecularReflectionAlbedo;
+  specularTransmissionSurface.reflectType = SPECULAR_TRANSMISSION;
+  specularTransmissionSurface.color = uSpecularTransmissionAlbedo;
+  specularTransmissionSurface.param1 = uSpecularTransmissionEta;
+  beckmannMicrofacetReflectionSurface.reflectType = BECKMANN_MICROFACET_REFLECTION;
+  beckmannMicrofacetReflectionSurface.color = uBeckmannMicrofacetAlbedo;
+  beckmannMicrofacetReflectionSurface.param1 = uBeckmannMicrofacetReflectionAlphaX;
+  beckmannMicrofacetReflectionSurface.param2 = uBeckmannMicrofacetReflectionAlphaY;
+  GGXMicrofacetReflectionSurface.reflectType = GGX_MICROFACET_REFLECTION;
+  GGXMicrofacetReflectionSurface.color = uGGXMicrofacetAlbedo;
+  GGXMicrofacetReflectionSurface.param1 = uGGXMicrofacetReflectionAlphaX;
+  GGXMicrofacetReflectionSurface.param2 = uGGXMicrofacetReflectionAlphaY;
+  fresnelBlendReflectionSurface.reflectType = FRESNEL_BLEND_REFLECTION;
+  fresnelBlendReflectionSurface.color = uFresnelBlendReflectionDiffuse;
+  fresnelBlendReflectionSurface.anotherColor = uFresnelBlendReflectionSpecular;
+
+  lightDirection1 = normalize(vec3(0.3, 1.0, 0.3));
+  lightDirection2 = normalize(vec3(-0.1, 0.3, -0.5));
+  lightDirection3 = normalize(vec3(-0.7, 0.1, 0.5));
+}
+
+vec2 randompos() {
+  int h = randomindex / 256;
+  int w = randomindex  - h * 256;
+  return vec2(float(w) / 256.0, float(h) / 256.0);
+}
+
+vec3 random3() {
+  randomindex += 1;
+  return texture2D(uRandomTexture, randompos()).xyz;
+}
+
+vec2 random2() {
+  return random3().xy;
+}
+
+float random() {
+  return random3().x;
+}
+
+bool planeY(in float y, in float tmin, inout float tmax, in Ray ray,
+      in SurfaceInfo surfaceInfo, inout HitInfo hitInfo) {
+  if (ray.dir.y == 0.0) return false;
+  float t = (y - ray.origin.y) / ray.dir.y;
+  if (t < tmin || t > tmax) return false;
+  tmax = t;
+  hitInfo.pos = at(ray, t);
+  hitInfo.normal = vec3(0.0, 1.0, 0.0);
+  hitInfo.surfaceInfo = surfaceInfo;
+  return true;
+}
+
+bool sphere(in vec3 center, in float radius, in float tmin, inout float tmax,
+      in Ray ray, in SurfaceInfo surfaceInfo, inout HitInfo hitInfo) {
+  vec3 oc = ray.origin - center;
+  float a = dot(ray.dir, ray.dir);
+  float b = dot(oc, ray.dir);
+  float c = dot(oc, oc) - radius * radius;
+  float dis = b * b - a * c;
+
+  if (dis < 0.0) return false;
+
+  float t = (-b - sqrt(dis)) / a;
+  if (t > tmin && t < tmax) {
+    tmax = t;
+    hitInfo.pos = at(ray, t);
+    hitInfo.normal = normalize(hitInfo.pos - center);
+    hitInfo.surfaceInfo = surfaceInfo;
+    return true;
+  }
+  t = (-b + sqrt(dis)) / a;
+  if (t > tmin && t < tmax) {
+    tmax = t;
+    hitInfo.pos = at(ray, t);
+    hitInfo.normal = normalize(hitInfo.pos - center);
+    hitInfo.surfaceInfo = surfaceInfo;
+    return true;
+  }
+
+  return false;
+}
+
+bool intersect(in Ray ray, in float tmin, in float tmax, inout HitInfo info) {
+  bool hit = false;
+  hit = planeY(-1.0, tmin, tmax, ray, floorSurface, info) || hit;
+  hit = sphere(vec3(  2.2, 0.0,  2.7), 1.0, tmin, tmax, ray, lambertianReflectionSurface, info) || hit;
+  hit = sphere(vec3( -2.8, 0.0, -0.4), 1.0, tmin, tmax, ray, orenNayerReflectionSurface, info) || hit;
+  hit = sphere(vec3(  2.1, 0.0, -0.3), 1.0, tmin, tmax, ray, specularReflectionSurface, info) || hit;
+  hit = sphere(vec3( -1.2, 0.0, -3.5), 1.0, tmin, tmax, ray, specularTransmissionSurface, info) || hit;
+  hit = sphere(vec3(  0.2, 0.0,  1.2), 1.0, tmin, tmax, ray, beckmannMicrofacetReflectionSurface, info) || hit;
+  hit = sphere(vec3(  1.2, 0.0, -2.9), 1.0, tmin, tmax, ray, GGXMicrofacetReflectionSurface, info) || hit;
+  hit = sphere(vec3( -2.2, 0.0,  3.5), 1.0, tmin, tmax, ray, fresnelBlendReflectionSurface, info) || hit;
+
+  return hit;
+}
+
+vec3 schlickFresnel(in vec3 f0, in float cosine) {
+  return f0 + (vec3(1.0) - f0) * pow(1.0 - cosine, 5.0);
+}
+
+float schlickFresnel(in float f0, in float cosine) {
+  return f0 + (1.0 - f0) * pow(1.0 - cosine, 5.0);
+}
+
+float schlickFresnel(float eta1, float eta2, float cosine) {
+  float f0 = pow((eta1 - eta2) / (eta1 + eta2), 2.0);
+  return schlickFresnel(f0, cosine);
+}
+
+mat3 orthonormal(in vec3 z) {
+  vec3 w = normalize(z);
+  vec3 v = normalize(cross(w, abs(w.x) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+  vec3 u = normalize(cross(v, w));
+  return mat3(u, v, w);
+}
+
+vec3 randomWiByCosine() {
+  vec2 r = random2();
+  float r1 = r.x;
+  float r2 = r.y;
+  float z = sqrt(1.0 - r2);
+  float phi = TWO_PI * r1;
+  float x = cos(phi) * sqrt(r2);
+  float y = sin(phi) * sqrt(r2);
+  return vec3(x, y, z);
+}
+
+float cosinePdf(in vec3 dir, in vec3 normal) {
+  float c = dot(dir, normal);
+  return c > 0.0 ? c / PI : 0.0;
+}
+
+vec3 lambertianBRDF(in vec3 r) {
+  return r * INV_PI;
+}
+
+float cosTheta(in vec3 w) {
+  return w.z;
+}
+
+float cosTheta2(in vec3 w) {
+  return w.z * w.z;
+}
+
+float sinTheta2(in vec3 w) {
+  return 1.0 - cosTheta2(w);
+}
+
+float sinTheta(in vec3 w) {
+  return sqrt(sinTheta2(w));
+}
+
+float tanTheta(in vec3 w) {
+  return sinTheta(w) / cosTheta(w);
+}
+
+float tanTheta2(in vec3 w) {
+  return sinTheta2(w) / cosTheta2(w);
+}
+
+float cosPhi(in vec3 w) {
+  float s = sinTheta(w);
+  return (s == 0.0) ? 1.0 : clamp(w.x / s, -1.0, 1.0);
+}
+
+float sinPhi(in vec3 w) {
+  float s = sinTheta(w);
+  return (s == 0.0) ? 0.0 : clamp(w.y / s, -1.0, 1.0);
+}
+
+float cosPhi2(in vec3 w) {
+  float c = cosPhi(w);
+  return c * c;
+}
+
+float sinPhi2(in vec3 w) {
+  float s = sinPhi(w);
+  return s * s;
+}
+
+vec3 orenNayerBRDF(in vec3 wi, in vec3 wo, in vec3 r, in float sigma) {
+  float sigma2 = sigma * sigma;
+  float a = 1.0 - (sigma2 / (2.0 * (sigma2 + 0.33)));
+  float b = 0.45 * sigma2 / (sigma2 + 0.09);
+  float sineI = sinTheta(wi);
+  float sineO = sinTheta(wo);
+  float maxCos = max(0.0, cosPhi(wi) * cosPhi(wo) + sinPhi(wi) * sinPhi(wo));
+  float sinAlpha, tanBeta;
+  if (abs(cosTheta(wi)) > abs(cosTheta(wo))) {
+    sinAlpha = sineO;
+    tanBeta = sineI / abs(cosTheta(wi));
+  } else {
+    sinAlpha = sineI;
+    tanBeta = sineO / abs(cosTheta(wo));
+  }
+
+  return r * INV_PI * (a + b * maxCos * sinAlpha * tanBeta);
+}
+
+float beckmannMicrofacetDistribution(in vec3 wh, in float alphaX, in float alphaY) {
+  float tan2 = tanTheta2(wh);
+  if (tan2 > POSITIVE_INF) return 0.0;
+  float cos4 = pow(cosTheta(wh), 4.0);
+  return exp(-tan2 * (cosPhi2(wh) / (alphaX * alphaX) + sinPhi2(wh) / (alphaY * alphaY))) /
+      (PI * alphaX * alphaY * cos4);
+}
+
+float beckmannLambda(in vec3 w, in float alphaX, in float alphaY) {
+  float absTan = abs(tanTheta(w));
+  if (absTan > POSITIVE_INF) return 0.0;
+  float alpha = sqrt(cosPhi2(w) * alphaX * alphaX + sinPhi2(w) * alphaY * alphaY);
+  float a = 1.0 / (alpha * absTan);
+  return a >= 1.6 ? 0.0 :
+    (1.0 - 1.259 * a + 0.396 * a * a) / (3.535 * a + 2.181 * a * a);
+}
+
+float beckmannG(in vec3 wo, in vec3 wi, float alphaX, float alphaY) {
+  return 1.0 / (1.0 + beckmannLambda(wo, alphaX, alphaY) + beckmannLambda(wi, alphaX, alphaY));
+}
+
+vec3 beckmannMicrofacetReflectionBRDF(in vec3 wo, in vec3 wi, float alphaX, float alphaY, in vec3 r) {
+  float cosineI = abs(cosTheta(wi));
+  float cosineO = abs(cosTheta(wo));
+  vec3 wh = normalize(wi + wo);
+  if (cosineI == 0.0 || cosineO == 0.0) return vec3(0.0);
+  float fresnel = 1.0;
+  return r * beckmannMicrofacetDistribution(wh, alphaX, alphaY)
+           * beckmannG(wo, wi, alphaX, alphaY) * fresnel
+           / (4.0 * cosineI * cosineO);
+}
+
+float GGXMicrofacetDistribution(in vec3 wh, in float alphaX, in float alphaY) {
+  float tan2 = tanTheta2(wh);
+  if (tan2 > POSITIVE_INF) return 0.0;
+  float cos4 = pow(cosTheta(wh), 4.0);
+  float e = (cosPhi2(wh) / (alphaX * alphaX) + sinPhi2(wh) / (alphaY * alphaY)) * tan2;
+  return 1.0 / (PI * alphaX * alphaY * cos4 * (1.0 + e) * (1.0 + e));
+}
+
+float GGXLambda(in vec3 w, in float alphaX, in float alphaY) {
+  float absTan = abs(tanTheta(w));
+  if (absTan > POSITIVE_INF) return 0.0;
+  float alpha = sqrt(cosPhi2(w) * alphaX * alphaX + sinPhi2(w) * alphaY * alphaY);
+  float a = (alpha * absTan) * (alpha * absTan);
+  return (-1.0 + sqrt(1.0 + a)) * 0.5;
+}
+
+float GGXG(in vec3 wo, in vec3 wi, float alphaX, float alphaY) {
+  return 1.0 / (1.0 + GGXLambda(wo, alphaX, alphaY) + GGXLambda(wi, alphaX, alphaY));
+}
+
+vec3 GGXMicrofacetReflectionBRDF(in vec3 wo, in vec3 wi, in float alphaX, in float alphaY, in vec3 r) {
+  float cosineI = abs(cosTheta(wi));
+  float cosineO = abs(cosTheta(wo));
+  vec3 wh = normalize(wi + wo);
+  if (cosineI == 0.0 || cosineO == 0.0) return vec3(0.0);
+  float fresnel = 1.0;
+  return r * GGXMicrofacetDistribution(wh, alphaX, alphaY)
+           * GGXG(wo, wi, alphaX, alphaY) * fresnel
+           / (4.0 * cosineI * cosineO);
+}
+
+mat3 inverse(mat3 m) {
+  float a00 = m[0][0], a01 = m[0][1], a02 = m[0][2];
+  float a10 = m[1][0], a11 = m[1][1], a12 = m[1][2];
+  float a20 = m[2][0], a21 = m[2][1], a22 = m[2][2];
+
+  float b01 = a22 * a11 - a12 * a21;
+  float b11 = -a22 * a10 + a12 * a20;
+  float b21 = a21 * a10 - a11 * a20;
+
+  float det = a00 * b01 + a01 * b11 + a02 * b21;
+
+  return mat3(b01, (-a22 * a01 + a02 * a21), (a12 * a01 - a02 * a11),
+              b11, (a22 * a00 - a02 * a20), (-a12 * a00 + a02 * a10),
+              b21, (-a21 * a00 + a01 * a20), (a11 * a00 - a01 * a10)) / det;
+}
+
+vec3 randomWhByBeckmannDistribution(in vec3 wo, in float alphaX, in float alphaY) {
+  float r1 = random();
+  float phi = atan(alphaY / alphaX * tan(2.0 * PI * r1 + 0.5 * PI));
+  phi += r1 > 0.5 ? PI : 0.0;
+  float sinP = sin(phi);
+  float cosP = cos(phi);
+  float tan2Theta = -log(1.0 - random()) /
+    (cosP * cosP / (alphaX * alphaX) + sinP * sinP / (alphaY * alphaY));
+
+  float cosT = 1.0 / sqrt(1.0 + tan2Theta);
+  float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+  vec3 wh = vec3(sinT * cos(phi), sinT * sin(phi), cosT);
+  wh *= wo.z * wh.z < 0.0 ? -1.0 : 1.0;
+  return wh;
+}
+
+float beckmannDistributionWhPdf(in vec3 wh, in float alphaX, in float alphaY) {
+  return beckmannMicrofacetDistribution(wh, alphaX, alphaY) * abs(cosTheta(wh));
+}
+
+vec3 randomWhByGGXDistribution(in vec3 wo, in float alphaX, in float alphaY) {
+  float r1 = random();
+  float phi = atan(alphaY / alphaX * tan(2.0 * PI * r1 + 0.5 * PI));
+  phi += r1 > 0.5 ? PI : 0.0;
+  float sinP = sin(phi);
+  float cosP = cos(phi);
+  float alpha2 = 1.0 / (cosP * cosP / (alphaX * alphaX) + sinP * sinP / (alphaY * alphaY));
+  float r0 = random();
+  float tan2Theta = alpha2 * r0 / (1.0 - r0);
+  float cosT = 1.0 / sqrt(1.0 + tan2Theta);
+  float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+  vec3 wh = vec3(sinT * cos(phi), sinT * sin(phi), cosT);
+  wh *= wo.z * wh.z < 0.0 ? -1.0 : 1.0;
+  return wh;
+}
+
+float GGXDistributionWhPdf(in vec3 wh, in float alphaX, in float alphaY) {
+  return GGXMicrofacetDistribution(wh, alphaX, alphaY) * abs(cosTheta(wh));
+}
+
+vec3 fresnelBlendReflectionBRDF(in vec3 wo, in vec3 wi, in vec3 rd, in vec3 rs) {
+  vec3 diffuse = rd * ((28.0) / (23.0 * PI)) * (vec3(1.0) - rs)
+               * (1.0 - pow(1.0 - 0.5 * abs(cosTheta(wi)), 5.0))
+               * (1.0 - pow(1.0 - 0.5 * abs(cosTheta(wo)), 5.0));
+  vec3 wh = normalize(wo + wi);
+  vec3 specular = beckmannMicrofacetDistribution(wh, 0.1, 0.1) * schlickFresnel(rs, dot(wi, wh))
+                / (4.0 * abs(dot(wh, wi)) * max(cosTheta(wi), cosTheta(wo)));
+  return diffuse + specular;
+}
+
+vec3 randomWiFresnelBlend(in vec3 wo) {
+  if (random() < 0.5) {
+    vec3 wh = randomWhByGGXDistribution(wo, 0.1, 0.1);
+    return reflect(-wo, wh);
+  } else {
+    return randomWiByCosine();
+  }
+}
+
+float randomFresnelBlendReflectionPdf(in vec3 wo, in vec3 wi) {
+  vec3 wh = normalize(wo + wi);
+  return 0.5 * (beckmannDistributionWhPdf(wh, 0.1, 0.1) / (4.0 * dot(wo, wh)))
+             +  (abs(cosTheta(wi) * INV_PI));
+}
+
+vec3 trace(in Ray ray) {
+  vec3 c = vec3(1.0);
+  for (int i = 0; i < 20; i++) {
+    HitInfo info;
+    if (intersect(ray, 0.0001, 1000.0, info)) {
+      if (info.surfaceInfo.reflectType == LAMBERTIAN_REFLECTION) {
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wi = randomWiByCosine();
+        vec3 dir = ortho * wi;
+        float p = cosinePdf(dir, info.normal);
+        if (p <= 0.0) return vec3(0.0);
+        vec3 brdf = lambertianBRDF(info.surfaceInfo.color);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      } else if (info.surfaceInfo.reflectType == OREN_NAYAR_REFLECTION) {
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wo = inverse(ortho) * (-ray.dir);
+        vec3 wi = randomWiByCosine();
+        vec3 dir = ortho * wi;
+        float p = cosinePdf(dir, info.normal);
+        if (p <= 0.0) return vec3(0.0);
+        vec3 brdf = orenNayerBRDF(wo, wi, info.surfaceInfo.color, info.surfaceInfo.param1);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      } else if (info.surfaceInfo.reflectType == SPECULAR_REFLECTION) {
+        c *= info.surfaceInfo.color;
+        ray = Ray(info.pos, reflect(ray.dir, info.normal));
+      } else if (info.surfaceInfo.reflectType == SPECULAR_TRANSMISSION) {
+        vec3 normal;
+        float eta1, eta2;
+        if (dot(ray.dir, info.normal) < 0.0) {
+          normal = info.normal;
+          eta1 = 1.0;
+          eta2 = info.surfaceInfo.param1;
+        } else {
+          normal = -info.normal;
+          eta1 = info.surfaceInfo.param1;
+          eta2 = 1.0;
+        }
+        float eta = eta2 / eta1;
+        vec3 dir = refract(ray.dir, normal, eta);
+        if (dir == vec3(0.0) || random() < schlickFresnel(eta1, eta2, dot(-ray.dir, normal))) {
+          dir = reflect(ray.dir, normal);
+        }
+        ray = Ray(info.pos, dir);
+        c *= info.surfaceInfo.color;
+      } else if (info.surfaceInfo.reflectType == BECKMANN_MICROFACET_REFLECTION) {
+        float alphaX = info.surfaceInfo.param1;
+        float alphaY = info.surfaceInfo.param2;
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wo = inverse(ortho) * (-ray.dir);
+        vec3 wh = randomWhByBeckmannDistribution(wo, alphaX, alphaY);
+        float p = beckmannDistributionWhPdf(wh, alphaX, alphaY) / (4.0 * dot(wo, wh));
+        if (p < 0.0) return vec3(0.0);
+        vec3 wi = reflect(-wo, wh);
+        vec3 dir = ortho * wi;
+        vec3 brdf = beckmannMicrofacetReflectionBRDF(wo, wi, alphaX, alphaY, info.surfaceInfo.color);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      } else if (info.surfaceInfo.reflectType == GGX_MICROFACET_REFLECTION) {
+        float alphaX = info.surfaceInfo.param1;
+        float alphaY = info.surfaceInfo.param2;
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wo = inverse(ortho) * (-ray.dir);
+        vec3 wh = randomWhByGGXDistribution(wo, alphaX, alphaY);
+        float p = GGXDistributionWhPdf(wh, alphaX, alphaY) / (4.0 * dot(wo, wh));
+        if (p <= 0.0) return vec3(0.0);
+        vec3 wi = reflect(-wo, wh);
+        vec3 dir = ortho * wi;
+        vec3 brdf = GGXMicrofacetReflectionBRDF(wo, wi, alphaX, alphaY, info.surfaceInfo.color);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      } else if (info.surfaceInfo.reflectType == FRESNEL_BLEND_REFLECTION) {
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wo = inverse(ortho) * (-ray.dir);
+        vec3 wi = randomWiFresnelBlend(wo);
+        float p = randomFresnelBlendReflectionPdf(wo, wi);
+        if (p < 0.0) return vec3(0.0);
+        vec3 dir = ortho * wi;
+        vec3 brdf = fresnelBlendReflectionBRDF(wo, wi, info.surfaceInfo.color, info.surfaceInfo.anotherColor);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      }
+    } else {
+      return c * (uLightIntensity1 * uLightColor1 * max(dot(ray.dir, lightDirection1), 0.0)
+               +  uLightIntensity2 * uLightColor2 * max(dot(ray.dir, lightDirection2), 0.0)
+               +  uLightIntensity3 * uLightColor3 * max(dot(ray.dir, lightDirection3), 0.0));
+    }
+  }
+  return vec3(0.0);
+}
+
+mat3 camera(in vec3 pos, in vec3 tar, in vec3 up) {
+  vec3 cz = normalize(tar - pos);
+  vec3 cx = normalize(cross(cz, normalize(up)));
+  vec3 cy = normalize(cross(cx, cz));
+  return mat3(cx, cy, cz);
+}
+
+Ray ray(in mat3 cam, in vec2 uv, in vec3 origin) {
+  vec3 dir = cam * normalize(vec3(uv, 1.0));
+  Ray ray = Ray(origin, dir);
+  return ray;
+}
+
+void main() {
+
+
+  initialize();
+
+  vec3 pos = vec3(uCameraDistance * cos(uCameraAngle), uCameraHeight, uCameraDistance * sin(uCameraAngle));
+  vec3 tar = vec3(0.0, 3.0, 0.0);
+  mat3 cam = camera(pos, tar, vec3(0.0, 1.0, 0.0));
+
+  vec3 c = vec3(0.0);
+  for (int i = 1; i <= 100; i++) {
+    vec2 uv = gl_FragCoord.xy + random2();
+    vec2 st = (uv * 2.0 - uResolution) / uResolution.y;
+    Ray ray = ray(cam, st, pos);
+    c += trace(ray);
+    if (uSamples == i) break;
+  }
+  c /= float(uSamples < 100 ? uSamples : 100);
+
+  c = pow(c, vec3(1.0 / 2.2));
+
+  gl_FragColor = vec4(c, 1.0);
+}
+        `,
+      });
+
+      const props = {
+        samples: 20,
+        animation: true,
+        floorColor: [90, 90, 90],
+      };
+
+      const gui = new dat.GUI();
+
+      const propsLight = {
+        light1: [255, 230, 220],
+        intensity1: 1.5,
+        light2: [220, 235, 255],
+        intensity2: 0.8,
+        light3: [200, 230, 240],
+        intensity3: 0.5
+      }
+      const guiLight = gui.addFolder("Light");
+      addColorToGui(guiLight, propsLight, 'light1', function(v) {
+        glsl.setUniform('uLightColor1', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiLight, propsLight, 'intensity1', function(v) {
+        glsl.setUniform('uLightIntensity1', '1f', v);
+      }, this, 0.0, 5.0);
+      addColorToGui(guiLight, propsLight, 'light2', function(v) {
+        glsl.setUniform('uLightColor2', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiLight, propsLight, 'intensity2', function(v) {
+        glsl.setUniform('uLightIntensity2', '1f', v);
+      }, this, 0.0, 5.0);
+      addColorToGui(guiLight, propsLight, 'light3', function(v) {
+        glsl.setUniform('uLightColor2', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiLight, propsLight, 'intensity3', function(v) {
+        glsl.setUniform('uLightIntensity3', '1f', v);
+      }, this, 0.0, 5.0);
+      glsl.setUniform('uLightColor1', '3fv',
+        [propsLight.light1[0] / 255.0, propsLight.light1[1] / 255.0, propsLight.light1[2] / 255.0]);
+      glsl.setUniform('uLightIntensity1', '1f', propsLight.intensity1);
+      glsl.setUniform('uLightColor2', '3fv',
+        [propsLight.light2[0] / 255.0, propsLight.light2[1] / 255.0, propsLight.light2[2] / 255.0]);
+      glsl.setUniform('uLightIntensity2', '1f', propsLight.intensity2);
+      glsl.setUniform('uLightColor3', '3fv',
+        [propsLight.light3[0] / 255.0, propsLight.light3[1] / 255.0, propsLight.light3[2] / 255.0]);
+      glsl.setUniform('uLightIntensity3', '1f', propsLight.intensity3);
+
+
+      const propsCamera = {
+        distance: 8.0,
+        angle: 0,
+        height: 3.0,
+      };
+      const guiCamera = gui.addFolder("Camera");
+      addToGui(guiCamera, propsCamera, 'distance', function(v) {
+        glsl.setUniform('uCameraDistance', '1f', v);
+      }, this, 2.0, 10.0);
+      addToGui(guiCamera, propsCamera, 'angle', function(v) {
+        glsl.setUniform('uCameraAngle', '1f', v);
+      }, this, -Math.PI, Math.PI);
+      addToGui(guiCamera, propsCamera, 'height', function(v) {
+        glsl.setUniform('uCameraHeight', '1f', v);
+      }, this, 0.0, 10.0);
+      glsl.setUniform('uCameraDistance', '1f', propsCamera.distance);
+      glsl.setUniform('uCameraAngle', '1f', propsCamera.angle);
+      glsl.setUniform('uCameraHeight', '1f', propsCamera.height);
+
+      const propsSpecularReflection = {
+        albedo: [255, 250, 240],
+      };
+      const guiSpecularReflection = gui.addFolder("Specular Reflection");
+      addColorToGui(guiSpecularReflection, propsSpecularReflection, 'albedo', function(v) {
+        glsl.setUniform('uSpecularReflectionAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      glsl.setUniform('uSpecularReflectionAlbedo', '3fv',
+        [propsSpecularReflection.albedo[0] / 255.0, propsSpecularReflection.albedo[1] / 255.0, propsSpecularReflection.albedo[2] / 255.0]);
+
+
+      const propsSpecularTransmission = {
+        albedo: [240, 245, 250],
+        eta: 1.2,
+      };
+      const guiSpecularTransmission = gui.addFolder("Specular Transmission");
+      addColorToGui(guiSpecularTransmission, propsSpecularTransmission, 'albedo', function(v) {
+        glsl.setUniform('uSpecularTransmissionAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiSpecularTransmission, propsSpecularTransmission, 'eta', function(v) {
+        glsl.setUniform('uSpecularTransmissionEta', '1f', v);
+      }, this, 0.0, 3.0);
+      glsl.setUniform('uSpecularTransmissionAlbedo', '3fv',
+        [propsSpecularTransmission.albedo[0] / 255.0, propsSpecularTransmission.albedo[1] / 255.0, propsSpecularTransmission.albedo[2] / 255.0]);
+      glsl.setUniform('uSpecularTransmissionEta', '1f', propsSpecularTransmission.eta);
+
+      const propsLambertianReflection = {
+        albedo: [160, 40, 15],
+      };
+      const guiLambertianReflection = gui.addFolder("Lambertian Reflection");
+      addColorToGui(guiLambertianReflection, propsLambertianReflection, 'albedo', function(v) {
+        glsl.setUniform('uLambertianReflectionAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      glsl.setUniform('uLambertianReflectionAlbedo', '3fv',
+        [propsLambertianReflection.albedo[0] / 255.0, propsLambertianReflection.albedo[1] / 255.0, propsLambertianReflection.albedo[2] / 255.0]);
+
+      const propsOrenNayerReflection = {
+        albedo: [90, 10, 20],
+        sigma: 0.0,
+      };
+      const guiOrenNayerReflection = gui.addFolder("Oren Nayer Reflection");
+      addColorToGui(guiOrenNayerReflection, propsOrenNayerReflection, 'albedo', function(v) {
+        glsl.setUniform('uOrenNayerReflectionAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiOrenNayerReflection, propsOrenNayerReflection, 'sigma', function(v) {
+        glsl.setUniform('uOrenNayerReflectionSigma', '1f', v);
+      }, this, 0.0, 3.14 / 2.0);
+      glsl.setUniform('uOrenNayerReflectionAlbedo', '3fv',
+        [propsOrenNayerReflection.albedo[0] / 255.0, propsOrenNayerReflection.albedo[1] / 255.0, propsOrenNayerReflection.albedo[2] / 255.0]);
+      glsl.setUniform('uOrenNayerReflectionSigma', '1f', propsOrenNayerReflection.sigma);
+
+      const propsBeckmannMicroFacetReflection = {
+        albedo: [240, 250, 200],
+        roughnessX: 0.1,
+        roughnessY: 0.1,
+      };
+      const guiBeckmannMicrofacetReflection = gui.addFolder("Beckmann MicroFacet Reflection");
+      addColorToGui(guiBeckmannMicrofacetReflection, propsBeckmannMicroFacetReflection, 'albedo', function(v) {
+        glsl.setUniform('uBeckmannMicrofacetAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiBeckmannMicrofacetReflection, propsBeckmannMicroFacetReflection, 'roughnessX', function(v) {
+        glsl.setUniform('uBeckmannMicrofacetReflectionAlphaX', '1f', v);
+      }, this, 0.0, 1.0);
+      addToGui(guiBeckmannMicrofacetReflection, propsBeckmannMicroFacetReflection, 'roughnessY', function(v) {
+        glsl.setUniform('uBeckmannMicrofacetReflectionAlphaY', '1f', v);
+      }, this, 0.0, 1.0);
+      glsl.setUniform('uBeckmannMicrofacetAlbedo', '3fv',
+        [propsBeckmannMicroFacetReflection.albedo[0] / 255.0, propsBeckmannMicroFacetReflection.albedo[1] / 255.0, propsBeckmannMicroFacetReflection.albedo[2] / 255.0]);
+      glsl.setUniform('uBeckmannMicrofacetReflectionAlphaX', '1f', propsBeckmannMicroFacetReflection.roughnessX);
+      glsl.setUniform('uBeckmannMicrofacetReflectionAlphaY', '1f', propsBeckmannMicroFacetReflection.roughnessY);
+
+      const propsGGXMicroFacetReflection = {
+        albedo: [190, 230, 210],
+        roughnessX: 0.1,
+        roughnessY: 0.1,
+      };
+      const guiGGXMicrofacetReflection = gui.addFolder("GGX MicroFacet Reflection");
+      addColorToGui(guiGGXMicrofacetReflection, propsGGXMicroFacetReflection, 'albedo', function(v) {
+        glsl.setUniform('uGGXMicrofacetAlbedo', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiGGXMicrofacetReflection, propsGGXMicroFacetReflection, 'roughnessX', function(v) {
+        glsl.setUniform('uGGXMicrofacetReflectionAlphaX', '1f', v);
+      }, this, 0.0, 1.0);
+      addToGui(guiGGXMicrofacetReflection, propsGGXMicroFacetReflection, 'roughnessY', function(v) {
+        glsl.setUniform('uGGXMicrofacetReflectionAlphaY', '1f', v);
+      }, this, 0.0, 1.0);
+      glsl.setUniform('uGGXMicrofacetAlbedo', '3fv',
+        [propsGGXMicroFacetReflection.albedo[0] / 255.0, propsGGXMicroFacetReflection.albedo[1] / 255.0, propsGGXMicroFacetReflection.albedo[2] / 255.0]);
+      glsl.setUniform('uGGXMicrofacetReflectionAlphaX', '1f', propsGGXMicroFacetReflection.roughnessX);
+      glsl.setUniform('uGGXMicrofacetReflectionAlphaY', '1f', propsGGXMicroFacetReflection.roughnessY);
+
+      const propsFresnelBlendReflection = {
+        diffuse: [30, 30, 240],
+        specular: [60, 60, 60],
+      }
+      const guiFresnelBlendReflection = gui.addFolder('Fresnel Blend Reflection');
+      addColorToGui(guiFresnelBlendReflection, propsFresnelBlendReflection, 'diffuse', function(v) {
+        glsl.setUniform('uFresnelBlendReflectionDiffuse', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addColorToGui(guiFresnelBlendReflection, propsFresnelBlendReflection, 'specular', function(v) {
+        glsl.setUniform('uFresnelBlendReflectionSpecular', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      glsl.setUniform('uFresnelBlendReflectionDiffuse', '3fv',
+        [propsFresnelBlendReflection.diffuse[0] / 255.0, propsFresnelBlendReflection.diffuse[1] / 255.0, propsFresnelBlendReflection.diffuse[2] / 255.0]);
+        glsl.setUniform('uFresnelBlendReflectionSpecular', '3fv',
+          [propsFresnelBlendReflection.specular[0] / 255.0, propsFresnelBlendReflection.specular[1] / 255.0, propsFresnelBlendReflection.specular[2] / 255.0]);
+
+
+      addColorToGui(gui, props, 'floorColor', function(v) {
+        glsl.setUniform('uFloorColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(gui, props, 'samples', function(v) {
+        glsl.setUniform('uSamples', '1i', v)
+      }, this, 1, 100);
+      var funcToStartOrStopAnimation = function(v) {
+        if (v && !glsl.isAnimating()) {
+          glsl.start();
+        } else if (!v && glsl.isAnimating()) {
+          glsl.stop();
+        }
+      };
+      addToGui(gui, props, 'animation', funcToStartOrStopAnimation, this);
+
+      glsl.setUniform('uFloorColor', '3fv',
+        [props.floorColor[0] / 255.0, props.floorColor[1] / 255.0, props.floorColor[2] / 255.0]);
+      glsl.setUniform('uSamples', '1i', props.samples);
+      glsl.setTexture('uRandomTexture', './textures/rgb_noise.bmp');
+
+      glsl.start();
+    });
+  </script>
+</body>
+</html>
