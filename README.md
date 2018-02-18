@@ -17,3 +17,9 @@
 [https://aadebdeb.github.io/webgl-raytracing/brdfs.html](https://aadebdeb.github.io/webgl-raytracing/brdfs.html)
 
 ![Image of BRDFs](https://aadebdeb.github.io/webgl-raytracing/screenshots/brdfs.png)
+
+## Participating Media
+
+[https://aadebdeb.github.io/webgl-raytracing/participating-media.html](https://aadebdeb.github.io/webgl-raytracing/participating-media.html)
+
+![Image of Participating Media](https://aadebdeb.github.io/webgl-raytracing/screenshots/pparticipating-media.png)

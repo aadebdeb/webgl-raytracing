@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <title>Perticipating Media</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+  <script src="glsl.js"></script>
+  <script>
+
+    function addColorToGui(gui, props, name, func, scope) {
+      const controller = gui.addColor(props, name);
+      controller.onChange(func.bind(scope));
+    }
+
+    function addToGui(gui, props, name, func, scope, min, max, step) {
+      const controller = gui.add(props, name, min, max, step);
+      controller.onChange(func.bind(scope));
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+
+      const glsl = new GLSL({
+        canvasId: 'canvas',
+        fragmentShaderSource: `
+precision mediump float;
+
+uniform float uTime;
+uniform vec2 uResolution;
+uniform vec2 uMouse;
+uniform bool uMousePressed;
+
+#define PI 3.14159265359
+#define TWO_PI 6.28318530718
+#define INV_PI 0.31830988618
+#define POSITIVE_INF 1e10
+#define NEGATIVE_INF -1e10
+
+uniform sampler2D uRandomTexture;
+uniform float uCameraDistance;
+uniform float uCameraAngle;
+uniform float uCameraHeight;
+uniform vec3 uMediumAbsorption;
+uniform vec3 uMediumScattering;
+uniform float uMediumG;
+uniform vec3 uFloorColor;
+uniform int uSamples;
+
+#define LAMBERTIAN_REFLECTION 1
+#define JUST_TRANSMISSION 2
+
+struct SurfaceInfo {
+  int type;
+  vec3 color;
+};
+
+struct Medium {
+  vec3 sigmaA; // absorption
+  vec3 sigmaS; // scattering
+  float g;
+};
+
+struct HitInfo {
+  vec3 pos;
+  vec3 normal;
+  Medium medium;
+  SurfaceInfo surfaceInfo;
+};
+
+struct Ray {
+  vec3 origin;
+  vec3 dir;
+};
+
+vec3 at(in Ray ray, in float t) {
+  return ray.origin + t * ray.dir;
+}
+
+int randomindex;
+Medium vacuum;
+void initialize() {
+  randomindex = int(texture2D(uRandomTexture, gl_FragCoord.xy * 0.01).x * 256.0 * 256.0);
+}
+
+vec2 randompos() {
+  int h = randomindex / 256;
+  int w = randomindex  - h * 256;
+  return vec2(float(w) / 256.0, float(h) / 256.0);
+}
+
+vec3 random3() {
+  randomindex += 1;
+  return texture2D(uRandomTexture, randompos()).xyz;
+}
+
+vec2 random2() {
+  return random3().xy;
+}
+
+float random() {
+  return random3().x;
+}
+
+bool planeY(in float y, in float tmin, inout float tmax, in Ray ray,
+      in SurfaceInfo surfaceInfo, inout HitInfo hitInfo) {
+  if (ray.dir.y == 0.0) return false;
+  float t = (y - ray.origin.y) / ray.dir.y;
+  if (t < tmin || t > tmax) return false;
+  tmax = t;
+  hitInfo.pos = at(ray, t);
+  hitInfo.normal = vec3(0.0, 1.0, 0.0);
+  hitInfo.surfaceInfo = surfaceInfo;
+  return true;
+}
+
+bool sphere(in vec3 center, in float radius, in float tmin, inout float tmax,
+      in Ray ray, in SurfaceInfo surfaceInfo, in Medium medium, inout HitInfo hitInfo) {
+  vec3 oc = ray.origin - center;
+  float a = dot(ray.dir, ray.dir);
+  float b = dot(oc, ray.dir);
+  float c = dot(oc, oc) - radius * radius;
+  float dis = b * b - a * c;
+
+  if (dis < 0.0) return false;
+
+  float t = (-b - sqrt(dis)) / a;
+  if (t > tmin && t < tmax) {
+    tmax = t;
+    hitInfo.pos = at(ray, t);
+    hitInfo.normal = normalize(hitInfo.pos - center);
+    hitInfo.surfaceInfo = surfaceInfo;
+    if (dot(ray.dir, hitInfo.normal) < 0.0) {
+      hitInfo.medium = medium;
+    } else {
+      hitInfo.medium = vacuum;
+    }
+    // hitInfo.medium = dot(ray.dir, hitInfo.normal) < 0.0 ? medium : vacuum;
+    return true;
+  }
+  t = (-b + sqrt(dis)) / a;
+  if (t > tmin && t < tmax) {
+    tmax = t;
+    hitInfo.pos = at(ray, t);
+    hitInfo.normal = normalize(hitInfo.pos - center);
+    hitInfo.surfaceInfo = surfaceInfo;
+    if (dot(ray.dir, hitInfo.normal) < 0.0) {
+      hitInfo.medium = medium;
+    } else {
+      hitInfo.medium = vacuum;
+    }
+    // hitInfo.medium = dot(ray.dir, hitInfo.normal) < 0.0 ? medium : vacuum;
+    return true;
+  }
+
+  return false;
+}
+
+bool intersect(in Ray ray, in float tmin, in float tmax, inout HitInfo info) {
+  bool hit = false;
+  SurfaceInfo floorSurface = SurfaceInfo(LAMBERTIAN_REFLECTION, uFloorColor);
+  SurfaceInfo sphereSurface = SurfaceInfo(JUST_TRANSMISSION, vec3(0.0));
+  Medium medium = Medium(uMediumAbsorption, uMediumScattering, uMediumG);
+  hit = planeY(-1.0, tmin, tmax, ray, floorSurface, info) || hit;
+  hit = sphere(vec3(0.0, 0.0, 0.0), 1.0, tmin, tmax, ray, sphereSurface, medium, info) || hit;
+  return hit;
+}
+
+mat3 orthonormal(in vec3 z) {
+  vec3 w = normalize(z);
+  vec3 v = normalize(cross(w, abs(w.x) > 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+  vec3 u = normalize(cross(v, w));
+  return mat3(u, v, w);
+}
+
+float HenyeyGreensteinPhaseFunction(in float cosine, in float g) {
+  float denom = 4.0 * PI * pow(1.0 + g * g + 2.0 * g * cosine, 1.5);
+  return (1.0 - g * g) / denom;
+}
+
+float HenyeyGreensteinPhaseFunction(in vec3 wo, in vec3 wi, in float g) {
+  return HenyeyGreensteinPhaseFunction(dot(wo, wi), g);
+}
+
+vec3 sampleByHenyeyGreensteinPhaseFunction(in float g) {
+  float cosTheta;
+  if (g < 0.001) {
+    float cosTheta = 1.0 - 2.0 * random();
+  } else {
+    float sqTerm = (1.0 - g * g) / (1.0 - g + 2.0 * g * random());
+    float cosTheta = (1.0 + g * g - sqTerm * sqTerm) / (2.0 * g);
+  }
+  float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+  float phi = TWO_PI * random();
+  return vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+}
+
+vec3 sampleByCosine() {
+  vec2 r = random2();
+  float r1 = r.x;
+  float r2 = r.y;
+  float z = sqrt(1.0 - r2);
+  float phi = TWO_PI * r1;
+  float x = cos(phi) * sqrt(r2);
+  float y = sin(phi) * sqrt(r2);
+  return vec3(x, y, z);
+}
+
+float cosinePDF(in vec3 dir, in vec3 normal) {
+  float c = dot(dir, normal);
+  return c > 0.0 ? c / PI : 0.0;
+}
+
+vec3 lambertianBRDF(in vec3 r) {
+  return r * INV_PI;
+}
+
+vec3 trace(in Ray ray) {
+  vec3 c = vec3(1.0);
+  Medium medium = vacuum;
+  for (int i = 0; i < 50; i++) {
+    HitInfo info;
+    if (intersect(ray, 0.001, 1000.0, info)) {
+      float dist = length(ray.origin - info.pos);
+      if (medium != vacuum) {
+        vec3 sigmaT = medium.sigmaA + medium.sigmaS;
+        float d = -log(1.0 - random()) / sigmaT.r;
+        if (d < dist) {
+          mat3 ortho = orthonormal(ray.dir);
+          vec3 pos = ray.origin + d * ray.dir;
+          vec3 wi = sampleByHenyeyGreensteinPhaseFunction(medium.g);
+          vec3 dir = ortho * wi;
+          vec3 tr = exp(-sigmaT * d);
+          ray = Ray(pos, dir);
+          vec3 density = sigmaT * tr;
+          float p = (density.r + density.g + density.b) / 3.0;
+          if (p <= 0.0) return vec3(0.0);
+          c *= tr * medium.sigmaS / p;
+          continue;
+        } else {
+          vec3 tr = exp(-sigmaT * dist);
+          vec3 density = tr;
+          float p = (density.r + density.g + density.b) / 3.0;
+          if (p <= 0.0) return vec3(0.0);
+          c *= tr / p;
+        }
+      }
+      if (info.surfaceInfo.type == LAMBERTIAN_REFLECTION) {
+        mat3 ortho = orthonormal(info.normal);
+        vec3 wi = sampleByCosine();
+        vec3 dir = ortho * wi;
+        float p = cosinePDF(dir, info.normal);
+        if (p <= 0.0) return vec3(0.0);
+        vec3 brdf = lambertianBRDF(info.surfaceInfo.color);
+        c *= brdf * dot(info.normal, dir) / p;
+        ray = Ray(info.pos, dir);
+      } else if (info.surfaceInfo.type == JUST_TRANSMISSION) {
+        ray = Ray(info.pos, ray.dir);
+        medium = info.medium;
+      }
+    } else {
+      return c * (mix(vec3(1.0), vec3(0.7, 0.8, 0.9), ray.dir.y * 0.5 + 0.5)
+               +  0.5 * vec3(1.0, 0.4, 0.2) * pow(max(dot(ray.dir, vec3(0.5, 0.5, 0.3)), 0.0), 2.0)
+               +  1.2 * vec3(1.0, 0.8, 0.7) * pow(max(dot(ray.dir, vec3(0.5, 0.5, 0.3)), 0.0), 4.0)
+               +  2.0 * vec3(1.0, 0.95, 0.9) * pow(max(dot(ray.dir, vec3(0.5, 0.5, 0.3)), 0.0), 12.0));
+    }
+  }
+  return vec3(0.0);
+}
+
+mat3 camera(in vec3 pos, in vec3 tar, in vec3 up) {
+  vec3 cz = normalize(tar - pos);
+  vec3 cx = normalize(cross(cz, normalize(up)));
+  vec3 cy = normalize(cross(cx, cz));
+  return mat3(cx, cy, cz);
+}
+
+Ray ray(in mat3 cam, in vec2 uv, in vec3 origin) {
+  vec3 dir = cam * normalize(vec3(uv, 1.0));
+  Ray ray = Ray(origin, dir);
+  return ray;
+}
+
+void main() {
+
+  initialize();
+
+  vec3 pos = vec3(uCameraDistance * cos(uCameraAngle), uCameraHeight, uCameraDistance * sin(uCameraAngle));
+  vec3 tar = vec3(0.0, 0.0, 0.0);
+  mat3 cam = camera(pos, tar, vec3(0.0, 1.0, 0.0));
+
+  vec3 c = vec3(0.0);
+  for (int i = 1; i <= 100; i++) {
+    vec2 uv = gl_FragCoord.xy + random2();
+    vec2 st = (uv * 2.0 - uResolution) / uResolution.y;
+    Ray ray = ray(cam, st, pos);
+    c += trace(ray);
+    if (uSamples == i) break;
+  }
+  c /= float(uSamples < 100 ? uSamples : 100);
+
+  c = pow(c, vec3(1.0 / 2.2));
+
+  gl_FragColor = vec4(c, 1.0);
+
+}
+        `,
+      });
+
+      const gui = new dat.GUI();
+
+      const props = {
+        samples: 20,
+        animation: true,
+        floorColor: [90, 90, 90],
+      };
+
+      const propsCamera = {
+        distance: 3.0,
+        angle: 0,
+        height: 1.0,
+      };
+      const guiCamera = gui.addFolder("Camera");
+      addToGui(guiCamera, propsCamera, 'distance', function(v) {
+        glsl.setUniform('uCameraDistance', '1f', v);
+      }, this, 2.0, 10.0);
+      addToGui(guiCamera, propsCamera, 'angle', function(v) {
+        glsl.setUniform('uCameraAngle', '1f', v);
+      }, this, -Math.PI, Math.PI);
+      addToGui(guiCamera, propsCamera, 'height', function(v) {
+        glsl.setUniform('uCameraHeight', '1f', v);
+      }, this, 0.0, 10.0);
+      glsl.setUniform('uCameraDistance', '1f', propsCamera.distance);
+      glsl.setUniform('uCameraAngle', '1f', propsCamera.angle);
+      glsl.setUniform('uCameraHeight', '1f', propsCamera.height);
+
+      const propsMedium = {
+        absorption: [60, 60, 60],
+        scattering: [240, 120, 120],
+        g: 0.0
+      };
+      const guiMedium = gui.addFolder("Participating Media");
+      addColorToGui(guiMedium, propsMedium, 'absorption', function(v) {
+        glsl.setUniform('uMediumAbsorption', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addColorToGui(guiMedium, propsMedium, 'scattering', function(v) {
+        glsl.setUniform('uMediumScattering', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(guiMedium, propsMedium, 'g', function(v) {
+        glsl.setUniform('uMediumG', '1f', v);
+      }, this, -1.0, 1.0);
+      glsl.setUniform('uMediumAbsorption', '3fv',
+        [propsMedium.absorption[0] / 255.0, propsMedium.absorption[1] / 255.0, propsMedium.absorption[2] / 255.0]);
+      glsl.setUniform('uMediumScattering', '3fv',
+        [propsMedium.scattering[0] / 255.0, propsMedium.scattering[1] / 255.0, propsMedium.scattering[2] / 255.0]);
+      glsl.setUniform('uMediumG', '1f', propsMedium.g);
+
+      addColorToGui(gui, props, 'floorColor', function(v) {
+        glsl.setUniform('uFloorColor', '3fv', [v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+      });
+      addToGui(gui, props, 'samples', function(v) {
+        glsl.setUniform('uSamples', '1i', v)
+      }, this, 1, 100);
+      var funcToStartOrStopAnimation = function(v) {
+        if (v && !glsl.isAnimating()) {
+          glsl.start();
+        } else if (!v && glsl.isAnimating()) {
+          glsl.stop();
+        }
+      };
+      addToGui(gui, props, 'animation', funcToStartOrStopAnimation, this);
+
+      glsl.setUniform('uFloorColor', '3fv',
+        [props.floorColor[0] / 255.0, props.floorColor[1] / 255.0, props.floorColor[2] / 255.0]);
+      glsl.setUniform('uSamples', '1i', props.samples);
+      glsl.setTexture('uRandomTexture', './textures/rgb_noise.bmp');
+
+      glsl.start();
+    });
+  </script>
+</body>
+</html>
